@@ -1,0 +1,98 @@
+name: Publish Device Health Quit Update
+on:
+  push:
+    paths:
+      - '.github/workflows/publish-device-health.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Update application package
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64,io,zipfile,pathlib
+          p=pathlib.Path("downloads/AppleDeviceHealthStation.zip.base64")
+          raw=base64.b64decode(p.read_text().strip())
+          with zipfile.ZipFile(io.BytesIO(raw)) as z:
+              files={n:z.read(n) for n in z.namelist()}
+          root="AppleDeviceHealthStation/"
+          src=files[root+"AppleDeviceHealthStation.swift"].decode()
+          src=src.replace('            button.action = #selector(showWindow)\n            button.target = self','            button.toolTip = "Apple Device Health Station"')
+          needle='        configureWindow()\n'
+          addition='''        configureStatusMenu()
+          '''
+          assert needle in src
+          src=src.replace(needle,addition+needle,1)
+          needle='    private func configureWindow() {'
+          addition='''    private func configureStatusMenu() {
+                  let menu = NSMenu(title: "Apple Device Health Station")
+                  let openItem = NSMenuItem(title: "Open Health Dashboard", action: #selector(showWindow), keyEquivalent: "")
+                  openItem.target = self
+                  menu.addItem(openItem)
+                  let refreshItem = NSMenuItem(title: "Refresh Health Data", action: #selector(refreshAction), keyEquivalent: "")
+                  refreshItem.target = self
+                  menu.addItem(refreshItem)
+                  menu.addItem(.separator())
+                  let quitItem = NSMenuItem(title: "Quit Apple Device Health Station", action: #selector(quitApplication), keyEquivalent: "q")
+                  quitItem.target = self
+                  menu.addItem(quitItem)
+                  statusItem.menu = menu
+              }
+
+          '''
+          assert needle in src
+          src=src.replace(needle,addition+needle,1)
+          needle='        stack.addArrangedSubview(row)'
+          assert needle in src
+          src=src.replace(needle,'''        let quitButton = makeButton("Quit App", #selector(quitApplication))
+                  quitButton.toolTip = "Completely close Apple Device Health Station"
+                  stack.addArrangedSubview(quitButton)
+          '''+needle,1)
+          needle='    @objc private func refreshAction()'
+          assert needle in src
+          src=src.replace(needle,'''    @objc private func quitApplication() {
+                  timer?.invalidate()
+                  timer = nil
+                  NSApp.terminate(nil)
+              }
+          '''+needle,1)
+          files[root+"AppleDeviceHealthStation.swift"]=src.encode()
+          installer=files[root+"Install.command"].decode()
+          old='"$SWIFTC" -parse-as-library -O -framework AppKit AppleDeviceHealthStation.swift -o "$DEST/Contents/MacOS/AppleDeviceHealthStation"'
+          assert old in installer
+          new='''ARCH="$(uname -m)"
+          case "$ARCH" in
+            arm64|x86_64) ;;
+            *) echo "Unsupported Mac architecture: $ARCH"; exit 1 ;;
+          esac
+          SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
+          BUILD_DIR="$(mktemp -d)"
+          trap 'rm -rf "$BUILD_DIR"' EXIT
+          "$SWIFTC" -parse-as-library -O -sdk "$SDK_PATH" \\
+            -target "${ARCH}-apple-macosx13.0" \\
+            -framework AppKit AppleDeviceHealthStation.swift \\
+            -o "$BUILD_DIR/AppleDeviceHealthStation"
+          cp "$BUILD_DIR/AppleDeviceHealthStation" "$DEST/Contents/MacOS/AppleDeviceHealthStation"
+          chmod +x "$DEST/Contents/MacOS/AppleDeviceHealthStation"'''
+          installer=installer.replace(old,new)
+          files[root+"Install.command"]=installer.encode()
+          with io.BytesIO() as buf:
+              with zipfile.ZipFile(buf,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=9) as out:
+                  for n,data in files.items():out.writestr(n,data)
+              p.write_text(base64.b64encode(buf.getvalue()).decode()+"\n")
+          print("Updated ZIP with Quit controls and supported compiler target")
+          PY
+      - name: Commit updated download
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add downloads/AppleDeviceHealthStation.zip.base64
+          git commit -m "Publish tested Apple Device Health Station Quit menu" || exit 0
+          git push
